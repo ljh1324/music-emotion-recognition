@@ -1,0 +1,231 @@
+from __future__ import unicode_literals
+import youtube_dl
+from bs4 import BeautifulSoup
+import urllib
+import requests
+import os
+import time
+
+query_page = 'http://www.youtube.com/results?search_query='
+mv_page = 'https://www.youtube.com'
+
+genie_tag_page = 'http://www.genie.co.kr/playlist/tags?tags='
+genie_music_page = 'http://www.genie.co.kr/playlist/detailView?plmSeq='
+
+
+def search_youtube_link(query):
+    query = query.lower()                               # query를 소문자로 변형
+    path = urllib.parse.quote_plus(query)               # string을 url 형태로 변환
+
+    page = requests.get(query_page + path)               # youtube 검색 url 생성후 페이지 요청
+    soup = BeautifulSoup(page.content, 'html.parser')
+    html_page = soup.prettify()
+
+    idx = html_page.lower().find('<h3 class="yt-lockup-title')     # 먼저 youtube 검색시 제목 표시란을 찾는다.
+    new_idx = html_page.find("href=", idx)             # 쿼리로 부터 'href='를 가진 문자의 위치를 찾는다.
+
+    if idx == -1:
+        return ''
+
+    page_str = ''
+    new_idx += 6
+    while True:
+        if html_page[new_idx] == '"':
+            break;
+        page_str += html_page[new_idx]
+        new_idx += 1
+
+    return mv_page + page_str
+
+
+def find_page(tag_number):
+    page_list = []
+
+    page = requests.get(genie_tag_page + tag_number)               # youtube 검색 url 생성후 페이지 요청
+    soup = BeautifulSoup(page.content, 'html.parser')
+    html_page = soup.prettify()
+
+    want_find_str = 'javascript:goDetailView(\''
+
+    find_idx = 0
+    while True:
+        idx = html_page.find(want_find_str, find_idx)     # want_find_str이 있는지 찾는다.
+        if idx == -1:
+            break
+
+        start_idx = idx + len(want_find_str)
+        end_idx = html_page.find('\'', start_idx)
+        number = html_page[start_idx:end_idx]         # javascript:goDetailView('4103') '4103' 숫자를 찾아 잘라낸다.
+
+        find_idx = end_idx
+
+        page_list.append(number)
+
+    return page_list
+
+
+def find_music(page_number):
+    title_list = []
+    artist_list = []
+
+    page = requests.get(genie_music_page + page_number)               # youtube 검색 url 생성후 페이지 요청
+
+    soup = BeautifulSoup(page.content, 'html.parser')
+    html_page = soup.prettify()
+
+    title_str = 'title="'
+    artist_str = 'fnViewArtist'
+    music_segment_str = 'class="list" songid'
+
+    find_idx = html_page.find(music_segment_str)      # 시작점 설정
+    for i in range(15):
+        idx = html_page.find(title_str, find_idx)     # 먼저 youtube 검색시 제목 표시란을 찾는다.
+        if idx == -1:
+            break
+        """
+        <a href = "#" class ="title" onclick="fnPlaySong('75911179');return false;" >아무도, 아무것도</a>
+        """
+        start_idx = idx + len(title_str)
+        end_idx = html_page.find('"', start_idx)
+
+        title = html_page[start_idx:end_idx]          # title="내 맘이 말을 해 (Reprise)" 에서 '내 맘이 말을 해 (Reprise)'를 잘라낸다
+
+        idx = html_page.find(artist_str, end_idx)             # "findViewArtist"를 찾아냄
+
+        start_idx = html_page.find('>', idx) + 1
+        end_idx = html_page.find('<', start_idx)
+        artist = html_page[start_idx:end_idx]              # >안녕바다</a> 에서 '안녕바다'를 잘라낸다
+
+        find_idx = html_page.find(music_segment_str, end_idx)
+
+        title_list.append(title)
+        artist_list.append(artist.strip())                  # '\n    조원선     \n' 을 '조원선' 으로 바꾼다.
+
+    return title_list, artist_list
+
+
+def save_all_music_that_have_same_tag(save_file_name, tag):
+    f = open(save_file_name, 'w')
+    page_list = find_page(tag)              # 태그를 가진 페이지를 찾음
+    for i in range(len(page_list)):
+        title_list, artist_list = find_music(page_list[i])
+        for j in range(len(title_list)):
+            f.write(title_list[j] + '/' + artist_list[j] + '\n')
+    f.close()
+
+
+def download_youtube_mp3(download_dir, file, start_n, num_of_music):
+    if not os.path.exists(download_dir):
+        os.makedirs(download_dir)
+
+    # \\에서 '.' 까지 잘라낸다  => ex) 'genie_music_data\\슬픔.txt' => '슬픔'
+    file_name = file[file.rfind('\\') + 1:file.rfind('.')]
+    parent_dir = os.path.dirname(download_dir)                      # download_dir의 상위 디렉토리
+
+    print(file_name)
+    f_error = open(os.path.join(parent_dir, file_name + '_error.txt'), 'w')
+    f_download = open(os.path.join(parent_dir, file_name + '_download.txt'), 'w')
+
+    f = open(file)
+
+    idx = 0
+    count = 0
+
+    while True:
+        line = f.readline()
+
+        if not line:
+            break
+
+        if idx < start_n:
+            idx += 1
+            continue
+
+        line = line[:len(line) - 1]  # 맨뒤의 개행문자 삭제
+        items = line.split('/')
+
+        music_name = items[1] + ' - ' + items[0]
+        # print(music_name)
+
+        if idx % 100 == 0:
+            print("Process {} 번째 음악 파일 까지 다운 완료".format(idx))
+        idx += 1
+
+        try:
+            link = search_youtube_link(music_name)
+
+            if link == '':
+                continue
+
+            youtube_download_opts = {
+                'format': 'bestaudio/best', ''
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                'outtmpl': os.path.join(download_dir, music_name) + '.%(ext)s'
+            }
+
+            with youtube_dl.YoutubeDL(youtube_download_opts) as ydl:
+                ydl.download([link, ])
+            count += 1
+            f_download.write(items[0] + '/' + items[1] + '/' + file_name + '/' + music_name + '.mp3' + '\n')
+        except Exception as e:
+            print(str(e))
+            f_error.write(items[0] + '/' + items[1] + '/' + file_name + '/' + music_name + '.mp3' + '\n')       # error 난 음악 출력.
+
+        if count >= num_of_music:
+            break
+    f.close()
+    f_error.close()
+    f_download.close()
+
+
+def replace_amp_2_special_char(file_name, save_file_name):
+    f = open(file_name, 'r')
+    f_save = open(save_file_name, 'w')
+
+    while True:
+        line = f.readline()
+        if not line:
+            break
+        line = line[:len(line) - 1]  # 맨뒤의 개행문자 삭제
+        line = line.replace("&amp;", "&")
+        f_save.write(line + '\n')
+
+
+def download_list(music_dir, download_file_dir, start_n, num_of_music):
+    file_list = os.listdir(download_file_dir)
+
+    for file in file_list:
+        print('Start Process ' + file)
+        save_dir_name = file[0:file.find('.')]
+        download_youtube_mp3(os.path.join(music_dir, save_dir_name), os.path.join(download_file_dir, file), start_n, num_of_music)
+
+# save_all_music_that_have_same_tag('genie_music_data\\슬픔.txt', 'SB0008')
+# save_all_music_that_have_same_tag('genie_music_data\\신나는.txt', 'SB0002')
+# save_all_music_that_have_same_tag('genie_music_data\\행복.txt', 'SB0025')
+# save_all_music_that_have_same_tag('genie_music_data\\몽환적인.txt', 'SB0023')
+# save_all_music_that_have_same_tag('genie_music_data\\분노.txt', 'SB0029')
+# save_all_music_that_have_same_tag('genie_music_data\\잔잔한.txt', 'SB0017')
+# save_all_music_that_have_same_tag('genie_music_data\\외로움.txt', 'SB0006')
+# save_all_music_that_have_same_tag('genie_music_data\\부드러움.txt', 'SB0014')
+
+# download_youtube_mp3('genie_music\\슬픔', 'genie_music_data\\슬픔.txt')
+# download_youtube_mp3('genie_music\\분노', 'genie_music_data\\분노.txt')
+# download_youtube_mp3('genie_music\\슬픔', 'genie_music_data\\슬픔.txt')
+
+# download_list('genie_music', 'genie_music_data', 100, 200)
+
+# replace_amp_2_special_char('genie_music_data\\몽환적인.txt', 'genie_music_data\\몽환적인2.txt')
+# replace_amp_2_special_char('genie_music_data\\신나는.txt', 'genie_music_data\\신나는2.txt')
+# replace_amp_2_special_char('genie_music_data\\행복.txt', 'genie_music_data\\행복2.txt')
+# replace_amp_2_special_char('genie_music_data\\분노.txt', 'genie_music_data\\분노2.txt')
+# replace_amp_2_special_char('genie_music_data\\잔잔한.txt', 'genie_music_data\\잔잔한2.txt')
+# replace_amp_2_special_char('genie_music_data\\슬픔.txt', 'genie_music_data\\슬픔2.txt')
+# replace_amp_2_special_char('genie_music_data\\외로움.txt', 'genie_music_data\\외로움_change.txt')
+# replace_amp_2_special_char('genie_music_data\\외로움.txt', 'genie_music_data\\부드러움_change.txt')
+
+# download_youtube_mp3('total_genie_music\\외로움', 'genie_music_data\\외로움_change.txt', 0, 500)
+download_youtube_mp3('total_genie_music\\부드러움', 'genie_music_data\\부드러움_change.txt', 0, 500)
